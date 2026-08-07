@@ -4,6 +4,9 @@ import android.content.Context
 import android.media.AudioAttributes
 import android.media.AudioFocusRequest
 import android.media.AudioManager
+import android.media.Ringtone
+import android.media.RingtoneManager
+import android.media.ToneGenerator
 import android.util.Log
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CoroutineScope
@@ -79,7 +82,7 @@ class WebRtcClient @Inject constructor(
     private val _callRejectedFlow = MutableSharedFlow<String>() // callerId
     val callRejectedFlow: SharedFlow<String> = _callRejectedFlow
 
-    // ─── WebRTC Internals ───
+    // ─── WebRTC & Audio Internals ───
     private var peerConnectionFactory: PeerConnectionFactory? = null
     private var peerConnection: PeerConnection? = null
     private var localAudioTrack: AudioTrack? = null
@@ -91,6 +94,10 @@ class WebRtcClient @Inject constructor(
     private var audioManager: AudioManager? = null
     private var audioFocusRequest: AudioFocusRequest? = null
     private val pendingIceCandidates = mutableListOf<IceCandidate>()
+    private var pendingRemoteSdpOffer: Pair<String, String>? = null
+
+    private var toneGenerator: ToneGenerator? = null
+    private var incomingRingtone: Ringtone? = null
 
     // ICE Servers: Google STUN + Metered.ca free public TURN
     private val iceServers = listOf(
@@ -113,17 +120,19 @@ class WebRtcClient @Inject constructor(
 
 
     private fun initializePeerConnectionFactory() {
-        eglBase = EglBase.create()
-
-        peerConnectionFactory = PeerConnectionFactory.builder()
-            .setVideoDecoderFactory(DefaultVideoDecoderFactory(eglBase!!.eglBaseContext))
-            .setVideoEncoderFactory(DefaultVideoEncoderFactory(eglBase!!.eglBaseContext, true, true))
-            .createPeerConnectionFactory()
-
-        Log.d(TAG, "PeerConnectionFactory initialized")
+        if (eglBase == null) {
+            eglBase = EglBase.create()
+        }
+        if (peerConnectionFactory == null) {
+            peerConnectionFactory = PeerConnectionFactory.builder()
+                .setVideoDecoderFactory(DefaultVideoDecoderFactory(eglBase!!.eglBaseContext))
+                .setVideoEncoderFactory(DefaultVideoEncoderFactory(eglBase!!.eglBaseContext, true, true))
+                .createPeerConnectionFactory()
+            Log.d(TAG, "PeerConnectionFactory initialized")
+        }
     }
 
-    // ─── OUTGOING CALL ───
+    // ─── OUTGOING CALL (Caller) ───
     fun startCall(
         callerId: String,
         targetId: String,
@@ -142,13 +151,14 @@ class WebRtcClient @Inject constructor(
             isIncoming = false
         )
         _callState.value = CallState.OUTGOING
+        startRingbackTone()
         requestAudioFocus()
-        if (peerConnectionFactory == null) initializePeerConnectionFactory()
+        initializePeerConnectionFactory()
         createPeerConnection()
         createAndSendOffer(targetId, type)
     }
 
-    // ─── INCOMING CALL ───
+    // ─── INCOMING CALL (Callee) ───
     fun receiveIncomingCall(
         callerId: String,
         callerName: String,
@@ -166,20 +176,34 @@ class WebRtcClient @Inject constructor(
             isIncoming = true
         )
         _callState.value = CallState.INCOMING
+        startIncomingRingtone()
     }
 
-    // ─── ACCEPT CALL — callee side ───
+    // ─── ACCEPT CALL (Callee Taps Accept) ───
     fun acceptCall() {
         Log.d(TAG, "CALL_ACCEPTED: Callee accepted the call")
+        stopAudioTones()
         requestAudioFocus()
-        if (peerConnectionFactory == null) initializePeerConnectionFactory()
+        initializePeerConnectionFactory()
         createPeerConnection()
         _callState.value = CallState.CONNECTED
+
+        // Process stored remote SDP offer if it arrived while ringing
+        pendingRemoteSdpOffer?.let { (callerId, sdpJson) ->
+            Log.d(TAG, "Applying stored pending remote SDP offer from $callerId")
+            onRemoteSdpOffer(callerId, sdpJson)
+            pendingRemoteSdpOffer = null
+        }
     }
 
     // ─── RECEIVE SDP OFFER (callee receives from caller) ───
     fun onRemoteSdpOffer(callerId: String, sdpJson: String) {
         Log.d(TAG, "OFFER_RECEIVED: Processing remote SDP offer from $callerId")
+        if (peerConnection == null) {
+            Log.d(TAG, "peerConnection is null on callee side. Storing offer pending acceptCall()")
+            pendingRemoteSdpOffer = Pair(callerId, sdpJson)
+            return
+        }
         try {
             val sdpObj = JSONObject(sdpJson)
             val sdp = SessionDescription(
@@ -224,6 +248,7 @@ class WebRtcClient @Inject constructor(
     // ─── RECEIVE SDP ANSWER (caller receives from callee) ───
     fun onRemoteSdpAnswer(sdpJson: String) {
         Log.d(TAG, "ANSWER_RECEIVED: Processing remote SDP answer")
+        stopAudioTones()
         try {
             val sdpObj = JSONObject(sdpJson)
             val sdp = SessionDescription(
@@ -316,14 +341,60 @@ class WebRtcClient @Inject constructor(
     // ─── RENDERER SETUP ───
     fun setLocalSurfaceRenderer(renderer: SurfaceViewRenderer) {
         localSurfaceRenderer = renderer
-        renderer.init(eglBase?.eglBaseContext, null)
-        renderer.setMirror(true)
+        if (eglBase == null) initializePeerConnectionFactory()
+        try {
+            renderer.init(eglBase?.eglBaseContext, null)
+            renderer.setMirror(true)
+            renderer.setEnableHardwareScaler(true)
+        } catch (e: Exception) {
+            Log.w(TAG, "Local SurfaceViewRenderer init (might be already initialized): ${e.message}")
+        }
     }
 
     fun setRemoteSurfaceRenderer(renderer: SurfaceViewRenderer) {
         remoteSurfaceRenderer = renderer
-        renderer.init(eglBase?.eglBaseContext, null)
-        renderer.setMirror(false)
+        if (eglBase == null) initializePeerConnectionFactory()
+        try {
+            renderer.init(eglBase?.eglBaseContext, null)
+            renderer.setMirror(false)
+            renderer.setEnableHardwareScaler(true)
+        } catch (e: Exception) {
+            Log.w(TAG, "Remote SurfaceViewRenderer init (might be already initialized): ${e.message}")
+        }
+    }
+
+    // ─── AUDIO TONES ───
+    private fun startRingbackTone() {
+        try {
+            stopAudioTones()
+            toneGenerator = ToneGenerator(AudioManager.STREAM_VOICE_CALL, 80)
+            toneGenerator?.startTone(ToneGenerator.TONE_SUP_RINGTONE)
+        } catch (e: Exception) {
+            Log.e(TAG, "Error starting ringback tone: ${e.message}")
+        }
+    }
+
+    private fun startIncomingRingtone() {
+        try {
+            stopAudioTones()
+            val uri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE)
+            incomingRingtone = RingtoneManager.getRingtone(context, uri)
+            incomingRingtone?.play()
+        } catch (e: Exception) {
+            Log.e(TAG, "Error starting incoming ringtone: ${e.message}")
+        }
+    }
+
+    private fun stopAudioTones() {
+        try {
+            toneGenerator?.stopTone()
+            toneGenerator?.release()
+            toneGenerator = null
+        } catch (e: Exception) {}
+        try {
+            incomingRingtone?.stop()
+            incomingRingtone = null
+        } catch (e: Exception) {}
     }
 
     // ─── PRIVATE HELPERS ───
@@ -350,7 +421,10 @@ class WebRtcClient @Inject constructor(
             override fun onConnectionChange(newState: PeerConnection.PeerConnectionState) {
                 Log.d(TAG, "PeerConnectionState: $newState")
                 when (newState) {
-                    PeerConnection.PeerConnectionState.CONNECTED -> _callState.value = CallState.CONNECTED
+                    PeerConnection.PeerConnectionState.CONNECTED -> {
+                        stopAudioTones()
+                        _callState.value = CallState.CONNECTED
+                    }
                     PeerConnection.PeerConnectionState.DISCONNECTED,
                     PeerConnection.PeerConnectionState.FAILED -> cleanupCall()
                     else -> {}
@@ -381,21 +455,29 @@ class WebRtcClient @Inject constructor(
         localAudioTrack?.setEnabled(true)
         peerConnection?.addTrack(localAudioTrack)
 
-        // Add video track for video calls
+        // Add video track for video calls safely
         val session = _currentSession.value
         if (session?.callType == CallType.VIDEO) {
-            val videoSource = peerConnectionFactory?.createVideoSource(false)
-            localVideoCapturer = createVideoCapturer()
-            localVideoCapturer?.initialize(
-                SurfaceTextureHelper.create("CaptureThread", eglBase?.eglBaseContext),
-                context,
-                videoSource?.capturerObserver
-            )
-            localVideoCapturer?.startCapture(1280, 720, 30)
-            localVideoTrack = peerConnectionFactory?.createVideoTrack("video_track_local", videoSource)
-            localVideoTrack?.setEnabled(true)
-            localVideoTrack?.addSink(localSurfaceRenderer)
-            peerConnection?.addTrack(localVideoTrack)
+            try {
+                val videoSource = peerConnectionFactory?.createVideoSource(false)
+                localVideoCapturer = createVideoCapturer()
+                if (localVideoCapturer != null && eglBase != null) {
+                    val surfaceTextureHelper = SurfaceTextureHelper.create("CaptureThread", eglBase?.eglBaseContext)
+                    localVideoCapturer?.initialize(
+                        surfaceTextureHelper,
+                        context,
+                        videoSource?.capturerObserver
+                    )
+                    localVideoCapturer?.startCapture(640, 480, 30)
+                    localVideoTrack = peerConnectionFactory?.createVideoTrack("video_track_local", videoSource)
+                    localVideoTrack?.setEnabled(true)
+                    localVideoTrack?.addSink(localSurfaceRenderer)
+                    peerConnection?.addTrack(localVideoTrack)
+                    Log.d(TAG, "Video capturer initialized successfully at 640x480")
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Error initializing video capturer: ${e.message}", e)
+            }
         }
 
         Log.d(TAG, "PeerConnection created with ${iceServers.size} ICE servers")
@@ -465,6 +547,7 @@ class WebRtcClient @Inject constructor(
     }
 
     private fun cleanupCall() {
+        stopAudioTones()
         try {
             localVideoCapturer?.stopCapture()
             localVideoCapturer?.dispose()
@@ -479,6 +562,7 @@ class WebRtcClient @Inject constructor(
         localAudioTrack = null
         peerConnection = null
         pendingIceCandidates.clear()
+        pendingRemoteSdpOffer = null
 
         audioFocusRequest?.let { audioManager?.abandonAudioFocusRequest(it) }
         audioManager?.mode = AudioManager.MODE_NORMAL
@@ -490,3 +574,4 @@ class WebRtcClient @Inject constructor(
         _isSpeakerOn.value = true
     }
 }
+
