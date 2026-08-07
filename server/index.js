@@ -66,6 +66,9 @@ app.post('/api/auth/login', (req, res) => {
 
     registeredUsers.set(userId, userObj);
     
+    // Broadcast newly registered user to all online sockets
+    io.emit('user_registered', userObj);
+    
     const accessToken = jwt.sign({ userId, email: userEmail }, JWT_SECRET, { expiresIn: '7d' });
     const refreshToken = jwt.sign({ userId, email: userEmail }, JWT_SECRET, { expiresIn: '30d' });
 
