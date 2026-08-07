@@ -90,6 +90,7 @@ class WebRtcClient @Inject constructor(
     private var eglBase: EglBase? = null
     private var audioManager: AudioManager? = null
     private var audioFocusRequest: AudioFocusRequest? = null
+    private val pendingIceCandidates = mutableListOf<IceCandidate>()
 
     // ICE Servers: Google STUN + Metered.ca free public TURN
     private val iceServers = listOf(
@@ -130,6 +131,7 @@ class WebRtcClient @Inject constructor(
         targetAvatar: String?,
         type: CallType
     ) {
+        Log.d(TAG, "CALL_STARTED: Caller $callerId starting $type call to $targetId")
         _currentSession.value = CallSession(
             callId = "call_${System.currentTimeMillis()}",
             callerId = callerId,
@@ -153,6 +155,7 @@ class WebRtcClient @Inject constructor(
         callerAvatar: String?,
         type: CallType
     ) {
+        Log.d(TAG, "OFFER_RECEIVED: Incoming $type call from $callerId ($callerName)")
         _currentSession.value = CallSession(
             callId = "call_${System.currentTimeMillis()}",
             callerId = callerId,
@@ -167,6 +170,7 @@ class WebRtcClient @Inject constructor(
 
     // ─── ACCEPT CALL — callee side ───
     fun acceptCall() {
+        Log.d(TAG, "CALL_ACCEPTED: Callee accepted the call")
         requestAudioFocus()
         if (peerConnectionFactory == null) initializePeerConnectionFactory()
         createPeerConnection()
@@ -175,7 +179,7 @@ class WebRtcClient @Inject constructor(
 
     // ─── RECEIVE SDP OFFER (callee receives from caller) ───
     fun onRemoteSdpOffer(callerId: String, sdpJson: String) {
-        Log.d(TAG, "Received SDP offer from $callerId")
+        Log.d(TAG, "OFFER_RECEIVED: Processing remote SDP offer from $callerId")
         try {
             val sdpObj = JSONObject(sdpJson)
             val sdp = SessionDescription(
@@ -184,7 +188,8 @@ class WebRtcClient @Inject constructor(
             )
             peerConnection?.setRemoteDescription(object : SdpObserver {
                 override fun onSetSuccess() {
-                    Log.d(TAG, "Remote SDP offer set successfully")
+                    Log.d(TAG, "OFFER_SET_SUCCESS: Remote SDP offer set. Draining pending ICE candidates...")
+                    drainPendingIceCandidates()
                     // Create answer
                     peerConnection?.createAnswer(object : SdpObserver {
                         override fun onCreateSuccess(answer: SessionDescription) {
@@ -195,7 +200,7 @@ class WebRtcClient @Inject constructor(
                                         put("sdp", answer.description)
                                     }.toString()
                                     scope.launch { _sdpAnswerFlow.emit(Pair(callerId, answerJson)) }
-                                    Log.d(TAG, "SDP answer emitted to $callerId")
+                                    Log.d(TAG, "ANSWER_SENT: SDP answer emitted to $callerId")
                                 }
                                 override fun onSetFailure(s: String?) { Log.e(TAG, "Set local desc failed: $s") }
                                 override fun onCreateSuccess(p0: SessionDescription?) {}
@@ -207,7 +212,7 @@ class WebRtcClient @Inject constructor(
                         override fun onSetFailure(s: String?) {}
                     }, MediaConstraints())
                 }
-                override fun onSetFailure(s: String?) { Log.e(TAG, "Set remote SDP failed: $s") }
+                override fun onSetFailure(s: String?) { Log.e(TAG, "Set remote SDP offer failed: $s") }
                 override fun onCreateSuccess(p0: SessionDescription?) {}
                 override fun onCreateFailure(s: String?) {}
             }, sdp)
@@ -218,7 +223,7 @@ class WebRtcClient @Inject constructor(
 
     // ─── RECEIVE SDP ANSWER (caller receives from callee) ───
     fun onRemoteSdpAnswer(sdpJson: String) {
-        Log.d(TAG, "Received SDP answer")
+        Log.d(TAG, "ANSWER_RECEIVED: Processing remote SDP answer")
         try {
             val sdpObj = JSONObject(sdpJson)
             val sdp = SessionDescription(
@@ -227,7 +232,8 @@ class WebRtcClient @Inject constructor(
             )
             peerConnection?.setRemoteDescription(object : SdpObserver {
                 override fun onSetSuccess() {
-                    Log.d(TAG, "Remote SDP answer set — PeerConnection negotiated!")
+                    Log.d(TAG, "ANSWER_SET_SUCCESS: Remote SDP answer set — PeerConnection negotiated! Draining pending ICE candidates...")
+                    drainPendingIceCandidates()
                     _callState.value = CallState.CONNECTED
                 }
                 override fun onSetFailure(s: String?) { Log.e(TAG, "Set remote answer failed: $s") }
@@ -248,10 +254,25 @@ class WebRtcClient @Inject constructor(
                 obj.optInt("sdpMLineIndex"),
                 obj.optString("candidate")
             )
-            peerConnection?.addIceCandidate(candidate)
-            Log.d(TAG, "Added remote ICE candidate")
+            if (peerConnection?.remoteDescription != null) {
+                peerConnection?.addIceCandidate(candidate)
+                Log.d(TAG, "ICE_RECEIVED: Added remote ICE candidate directly")
+            } else {
+                pendingIceCandidates.add(candidate)
+                Log.d(TAG, "ICE_QUEUED: Remote description not set yet. Queued candidate (total: ${pendingIceCandidates.size})")
+            }
         } catch (e: Exception) {
             Log.e(TAG, "Failed to add ICE candidate: ${e.message}")
+        }
+    }
+
+    private fun drainPendingIceCandidates() {
+        if (pendingIceCandidates.isNotEmpty()) {
+            Log.d(TAG, "DRAINING_ICE: Flushing ${pendingIceCandidates.size} pending ICE candidates")
+            for (candidate in pendingIceCandidates) {
+                peerConnection?.addIceCandidate(candidate)
+            }
+            pendingIceCandidates.clear()
         }
     }
 
@@ -457,6 +478,7 @@ class WebRtcClient @Inject constructor(
         localVideoTrack = null
         localAudioTrack = null
         peerConnection = null
+        pendingIceCandidates.clear()
 
         audioFocusRequest?.let { audioManager?.abandonAudioFocusRequest(it) }
         audioManager?.mode = AudioManager.MODE_NORMAL
