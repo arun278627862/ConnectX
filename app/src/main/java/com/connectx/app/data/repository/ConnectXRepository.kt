@@ -49,6 +49,39 @@ class ConnectXRepository @Inject constructor(
                 chatDao.updateLastMessage(msg.chatId, msg.content, msg.timestamp)
             }
         }
+        kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
+            socketManager.newUserDiscovered.collect { json ->
+                val userId = json.optString("id")
+                val name = json.optString("name")
+                val email = json.optString("email")
+                val phone = json.optString("phoneNumber", "+1 555-0199")
+                if (userId.isNotEmpty()) {
+                    contactDao.insertContact(
+                        ContactEntity(
+                            id = userId,
+                            name = name,
+                            phoneNumber = phone,
+                            email = email,
+                            avatarUrl = null,
+                            isOnline = true,
+                            lastSeen = "Online"
+                        )
+                    )
+                    chatDao.insertChat(
+                        ChatEntity(
+                            id = userId,
+                            name = name,
+                            avatarUrl = null,
+                            isGroup = false,
+                            lastMessage = "Connected live",
+                            lastMessageTimestamp = System.currentTimeMillis(),
+                            isOnline = true,
+                            lastSeen = "Online"
+                        )
+                    )
+                }
+            }
+        }
     }
 
     fun getMessagesForChat(chatId: String): Flow<List<MessageEntity>> = messageDao.getMessagesForChat(chatId)

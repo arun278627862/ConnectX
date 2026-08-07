@@ -36,6 +36,9 @@ class RealtimeSocketManager @Inject constructor(
     private val _incomingCallOffer = MutableSharedFlow<JSONObject>()
     val incomingCallOffer: SharedFlow<JSONObject> = _incomingCallOffer
 
+    private val _newUserDiscovered = MutableSharedFlow<JSONObject>()
+    val newUserDiscovered: SharedFlow<JSONObject> = _newUserDiscovered
+
     init {
         scope.launch {
             val config = prefsManager.appConfigFlow.first()
@@ -60,6 +63,12 @@ class RealtimeSocketManager @Inject constructor(
             socket?.on(Socket.EVENT_CONNECT) {
                 Log.d("SocketManager", "Connected to Socket server: $cleanUrl")
                 socket?.emit("register_user", userId)
+            }
+
+            socket?.on("user_registered") { args ->
+                if (args.isNotEmpty() && args[0] is JSONObject) {
+                    scope.launch { _newUserDiscovered.emit(args[0] as JSONObject) }
+                }
             }
 
             socket?.on("receive_message") { args ->
