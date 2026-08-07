@@ -42,11 +42,29 @@ app.get('/api/health', (req, res) => {
     res.json({ status: 'OK', serverTime: new Date() });
 });
 
+// In-memory registered users database
+const registeredUsers = new Map();
+
 // Authentication endpoints
 app.post('/api/auth/login', (req, res) => {
     const { email, password, phone, otp, googleIdToken } = req.body;
     const userEmail = email || `${phone || 'user'}@connectx.io`;
-    const userId = "usr_" + Math.random().toString(36).substring(2, 9);
+    // Create consistent deterministic userId based on email/phone
+    const userId = "usr_" + Buffer.from(userEmail).toString('hex').substring(0, 10);
+    const userName = userEmail.split('@')[0];
+
+    const userObj = {
+        id: userId,
+        name: userName,
+        email: userEmail,
+        phoneNumber: phone || "+1 555-0199",
+        avatarUrl: null,
+        statusMessage: "Hey there! I am using ConnectX live.",
+        isOnline: true,
+        lastSeen: "Online"
+    };
+
+    registeredUsers.set(userId, userObj);
     
     const accessToken = jwt.sign({ userId, email: userEmail }, JWT_SECRET, { expiresIn: '7d' });
     const refreshToken = jwt.sign({ userId, email: userEmail }, JWT_SECRET, { expiresIn: '30d' });
@@ -56,10 +74,15 @@ app.post('/api/auth/login', (req, res) => {
         refreshToken,
         userId,
         email: userEmail,
-        name: userEmail.split('@')[0],
+        name: userName,
         phone: phone || "+1 555-0199",
         photoUrl: null
     });
+});
+
+app.get('/api/users', (req, res) => {
+    const users = Array.from(registeredUsers.values());
+    res.json(users);
 });
 
 app.post('/api/auth/otp/send', (req, res) => {
