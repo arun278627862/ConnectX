@@ -153,6 +153,17 @@ fun CallScreen(
                     Icon(Icons.Default.VolumeUp, contentDescription = "Speaker", tint = Color.White)
                 }
 
+                if (callState == CallState.INCOMING) {
+                    IconButton(
+                        onClick = { viewModel.webRtcClient.acceptCall() },
+                        modifier = Modifier
+                            .size(64.dp)
+                            .background(Color.Green, CircleShape)
+                    ) {
+                        Icon(Icons.Default.Call, contentDescription = "Accept Call", tint = Color.White)
+                    }
+                }
+
                 IconButton(
                     onClick = { viewModel.webRtcClient.endCall() },
                     modifier = Modifier

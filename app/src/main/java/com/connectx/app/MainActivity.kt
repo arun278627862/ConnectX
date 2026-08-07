@@ -1,8 +1,13 @@
 package com.connectx.app
 
+import android.Manifest
+import android.os.Build
 import android.os.Bundle
+import android.util.Log
 import androidx.activity.ComponentActivity
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.compose.setContent
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.hilt.navigation.compose.hiltViewModel
@@ -20,6 +25,8 @@ import com.connectx.app.ui.screens.group.GroupCreateScreen
 import com.connectx.app.ui.screens.home.HomeScreen
 import com.connectx.app.ui.screens.ptt.PttScreen
 import com.connectx.app.ui.theme.ConnectXTheme
+import com.connectx.app.webrtc.CallState
+import com.connectx.app.webrtc.WebRtcClient
 import dagger.hilt.android.AndroidEntryPoint
 import dagger.hilt.android.lifecycle.HiltViewModel
 import javax.inject.Inject
@@ -35,10 +42,13 @@ class MainViewModel @Inject constructor(
 @AndroidEntryPoint
 class MainActivity : ComponentActivity() {
 
-    private val requestPermissionLauncher = registerForActivityResult(
-        androidx.activity.result.contract.ActivityResultContracts.RequestMultiplePermissions()
+    @Inject
+    lateinit var webRtcClient: WebRtcClient
+
+    private val permissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
     ) { permissions ->
-        // Permissions granted or denied handled
+        Log.d("Permissions", "Granted: $permissions")
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -46,23 +56,30 @@ class MainActivity : ComponentActivity() {
         
         // Request runtime permissions on launch
         val permissionsToRequest = mutableListOf(
-            android.Manifest.permission.CAMERA,
-            android.Manifest.permission.RECORD_AUDIO,
-            android.Manifest.permission.READ_CONTACTS
+            Manifest.permission.CAMERA,
+            Manifest.permission.RECORD_AUDIO,
+            Manifest.permission.READ_CONTACTS
         )
-        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
-            permissionsToRequest.add(android.Manifest.permission.POST_NOTIFICATIONS)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            permissionsToRequest.add(Manifest.permission.POST_NOTIFICATIONS)
         }
-        requestPermissionLauncher.launch(permissionsToRequest.toTypedArray())
+        permissionLauncher.launch(permissionsToRequest.toTypedArray())
 
         setContent {
             val mainViewModel: MainViewModel = hiltViewModel()
             val authTokens by mainViewModel.authTokens.collectAsState(initial = com.connectx.app.data.local.preferences.AuthTokens())
             val themeMode by mainViewModel.themeMode.collectAsState(initial = "SYSTEM")
+            val callState by webRtcClient.callState.collectAsState()
 
             ConnectXTheme(themeMode = themeMode) {
                 val navController = rememberNavController()
                 val startDestination = if (authTokens.accessToken != null) Screen.Home.route else Screen.Auth.route
+
+                LaunchedEffect(callState) {
+                    if (callState == CallState.INCOMING) {
+                        navController.navigate(Screen.Call.route)
+                    }
+                }
 
                 NavHost(navController = navController, startDestination = startDestination) {
                     composable(Screen.Config.route) {
