@@ -82,6 +82,9 @@ interface ContactDao {
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertContacts(contacts: List<ContactEntity>)
+
+    @Query("UPDATE contacts SET isOnline = :isOnline, lastSeen = :lastSeen WHERE id = :userId")
+    suspend fun updateOnlineStatus(userId: String, isOnline: Boolean, lastSeen: String)
 }
 
 @Dao

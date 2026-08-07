@@ -1,8 +1,10 @@
 package com.connectx.app.data.repository
 
+import com.connectx.app.data.local.dao.CallLogDao
 import com.connectx.app.data.local.dao.ChatDao
 import com.connectx.app.data.local.dao.ContactDao
 import com.connectx.app.data.local.dao.MessageDao
+import com.connectx.app.data.local.entity.CallLogEntity
 import com.connectx.app.data.local.entity.ChatEntity
 import com.connectx.app.data.local.entity.ContactEntity
 import com.connectx.app.data.local.entity.MessageEntity
@@ -12,6 +14,10 @@ import com.connectx.app.data.local.preferences.AppPreferencesManager
 import com.connectx.app.data.remote.api.ConnectXApiService
 import com.connectx.app.data.remote.api.LoginRequest
 import com.connectx.app.data.remote.socket.RealtimeSocketManager
+import com.connectx.app.webrtc.CallType
+import com.connectx.app.webrtc.WebRtcClient
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.launch
 import javax.inject.Inject
@@ -22,21 +28,25 @@ class ConnectXRepository @Inject constructor(
     private val chatDao: ChatDao,
     private val messageDao: MessageDao,
     private val contactDao: ContactDao,
-    private val callLogDao: com.connectx.app.data.local.dao.CallLogDao,
+    private val callLogDao: CallLogDao,
     private val apiService: ConnectXApiService,
     private val prefsManager: AppPreferencesManager,
     private val socketManager: RealtimeSocketManager,
-    private val webRtcClient: com.connectx.app.webrtc.WebRtcClient
+    private val webRtcClient: WebRtcClient
 ) {
     var currentUserId: String = "user_101"
         private set
 
     val allChats: Flow<List<ChatEntity>> = chatDao.getAllChats()
     val allContacts: Flow<List<ContactEntity>> = contactDao.getAllContacts()
-    val allCallLogs: Flow<List<com.connectx.app.data.local.entity.CallLogEntity>> = callLogDao.getAllCallLogs()
+    val allCallLogs: Flow<List<CallLogEntity>> = callLogDao.getAllCallLogs()
+
+    private val scope = CoroutineScope(Dispatchers.IO)
+    private var callStartTimestamp: Long = 0L
 
     init {
-        kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
+        // ── Incoming text messages ──
+        scope.launch {
             socketManager.incomingMessages.collect { msg ->
                 val entity = MessageEntity(
                     id = msg.id,
@@ -53,21 +63,174 @@ class ConnectXRepository @Inject constructor(
                 chatDao.updateLastMessage(msg.senderId, msg.content, msg.timestamp)
             }
         }
-        kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
+
+        // ── Incoming call invite (ring the phone) ──
+        scope.launch {
             socketManager.incomingCallOffer.collect { json ->
+                val callerId = json.optString("callerId", "")
                 val callerName = json.optString("callerName", "ConnectX Caller")
                 val callTypeStr = json.optString("callType", "VOICE")
-                val type = if (callTypeStr == "VIDEO") com.connectx.app.webrtc.CallType.VIDEO else com.connectx.app.webrtc.CallType.VOICE
-                webRtcClient.receiveIncomingCall(callerName, null, type)
+                val type = if (callTypeStr == "VIDEO") CallType.VIDEO else CallType.VOICE
+                webRtcClient.receiveIncomingCall(callerId, callerName, null, type)
             }
         }
-        kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
+
+        // ── SDP Offer received (callee side) — create PeerConnection + answer ──
+        scope.launch {
+            socketManager.sdpOfferFlow.collect { json ->
+                val callerId = json.optString("callerId", "")
+                val sdpJson = json.optString("sdp", "")
+                webRtcClient.onRemoteSdpOffer(callerId, sdpJson)
+            }
+        }
+
+        // ── SDP Answer received (caller side) — complete negotiation ──
+        scope.launch {
+            socketManager.sdpAnswerFlow.collect { json ->
+                val sdpJson = json.optString("sdp", "")
+                webRtcClient.onRemoteSdpAnswer(sdpJson)
+            }
+        }
+
+        // ── ICE Candidate received (both sides) ──
+        scope.launch {
+            socketManager.iceCandidateFlow.collect { json ->
+                val candidateJson = json.optString("candidate", "")
+                webRtcClient.onRemoteIceCandidate(candidateJson)
+            }
+        }
+
+        // ── Callee rejected the call ──
+        scope.launch {
+            socketManager.callRejectFlow.collect { json ->
+                val targetId = json.optString("targetId", "")
+                val peerName = webRtcClient.currentSession.value?.peerName ?: "User"
+                // Save missed call log
+                callLogDao.insertCallLog(
+                    CallLogEntity(
+                        id = "cl_${System.currentTimeMillis()}",
+                        callerName = peerName,
+                        callerAvatar = null,
+                        callType = webRtcClient.currentSession.value?.callType?.name ?: "VOICE",
+                        isIncoming = false,
+                        isMissed = true,
+                        durationSeconds = 0,
+                        timestamp = System.currentTimeMillis()
+                    )
+                )
+                webRtcClient.endCall()
+            }
+        }
+
+        // ── Remote side ended the call ──
+        scope.launch {
+            socketManager.callEndFlow.collect { json ->
+                val duration = if (callStartTimestamp > 0L)
+                    ((System.currentTimeMillis() - callStartTimestamp) / 1000).toInt()
+                else 0
+                val peerName = webRtcClient.currentSession.value?.peerName ?: "User"
+                callLogDao.insertCallLog(
+                    CallLogEntity(
+                        id = "cl_${System.currentTimeMillis()}",
+                        callerName = peerName,
+                        callerAvatar = null,
+                        callType = webRtcClient.currentSession.value?.callType?.name ?: "VOICE",
+                        isIncoming = webRtcClient.currentSession.value?.isIncoming ?: true,
+                        isMissed = duration == 0,
+                        durationSeconds = duration,
+                        timestamp = System.currentTimeMillis()
+                    )
+                )
+                callStartTimestamp = 0L
+                webRtcClient.endCall()
+            }
+        }
+
+        // ── WebRtcClient SDP Offer → send over socket ──
+        scope.launch {
+            webRtcClient.sdpOfferFlow.collect { (targetId, sdpJson) ->
+                socketManager.sendSdpOffer(
+                    callerId = currentUserId,
+                    targetId = targetId,
+                    sdpJson = sdpJson
+                )
+            }
+        }
+
+        // ── WebRtcClient SDP Answer → send over socket ──
+        scope.launch {
+            webRtcClient.sdpAnswerFlow.collect { (callerId, sdpJson) ->
+                socketManager.sendSdpAnswer(
+                    callerId = callerId,
+                    targetId = currentUserId,
+                    sdpJson = sdpJson
+                )
+            }
+        }
+
+        // ── WebRtcClient ICE candidates → send over socket ──
+        scope.launch {
+            webRtcClient.iceCandidateFlow.collect { (targetId, candidateJson) ->
+                socketManager.sendIceCandidate(
+                    senderId = currentUserId,
+                    targetId = targetId,
+                    candidateJson = candidateJson
+                )
+            }
+        }
+
+        // ── WebRtcClient ended call → notify peer ──
+        scope.launch {
+            webRtcClient.callEndedFlow.collect { targetId ->
+                if (targetId.isNotEmpty()) {
+                    socketManager.sendCallEnd(senderId = currentUserId, targetId = targetId)
+                }
+                val duration = if (callStartTimestamp > 0L)
+                    ((System.currentTimeMillis() - callStartTimestamp) / 1000).toInt()
+                else 0
+                val peerName = webRtcClient.currentSession.value?.peerName ?: "User"
+                callLogDao.insertCallLog(
+                    CallLogEntity(
+                        id = "cl_${System.currentTimeMillis()}",
+                        callerName = peerName,
+                        callerAvatar = null,
+                        callType = webRtcClient.currentSession.value?.callType?.name ?: "VOICE",
+                        isIncoming = webRtcClient.currentSession.value?.isIncoming ?: false,
+                        isMissed = duration == 0,
+                        durationSeconds = duration,
+                        timestamp = System.currentTimeMillis()
+                    )
+                )
+                callStartTimestamp = 0L
+            }
+        }
+
+        // ── WebRtcClient rejected call → notify caller ──
+        scope.launch {
+            webRtcClient.callRejectedFlow.collect { callerId ->
+                if (callerId.isNotEmpty()) {
+                    socketManager.sendCallReject(callerId = callerId, targetId = currentUserId)
+                }
+            }
+        }
+
+        // ── Track call connected time ──
+        scope.launch {
+            webRtcClient.callState.collect { state ->
+                if (state == com.connectx.app.webrtc.CallState.CONNECTED && callStartTimestamp == 0L) {
+                    callStartTimestamp = System.currentTimeMillis()
+                }
+            }
+        }
+
+        // ── New user joined (live discovery) ──
+        scope.launch {
             socketManager.newUserDiscovered.collect { json ->
                 val userId = json.optString("id")
                 val name = json.optString("name")
                 val email = json.optString("email")
-                val phone = json.optString("phoneNumber", "+1 555-0199")
-                if (userId.isNotEmpty()) {
+                val phone = json.optString("phoneNumber", "")
+                if (userId.isNotEmpty() && userId != currentUserId) {
                     contactDao.insertContact(
                         ContactEntity(
                             id = userId,
@@ -85,12 +248,24 @@ class ConnectXRepository @Inject constructor(
                             name = name,
                             avatarUrl = null,
                             isGroup = false,
-                            lastMessage = "Connected live",
+                            lastMessage = "Tap to start chatting",
                             lastMessageTimestamp = System.currentTimeMillis(),
                             isOnline = true,
                             lastSeen = "Online"
                         )
                     )
+                }
+            }
+        }
+
+        // ── User status changes (online/offline) ──
+        scope.launch {
+            socketManager.userStatusUpdate.collect { json ->
+                val userId = json.optString("userId")
+                val isOnline = json.optBoolean("isOnline", false)
+                val lastSeen = json.optString("lastSeen", "")
+                if (userId.isNotEmpty()) {
+                    contactDao.updateOnlineStatus(userId, isOnline, if (isOnline) "Online" else "Last seen recently")
                 }
             }
         }
@@ -115,9 +290,9 @@ class ConnectXRepository @Inject constructor(
                     phone = auth.phone,
                     photoUrl = auth.photoUrl
                 )
-                socketManager.connect("wss://connectx-5kk8.onrender.com", auth.userId)
-                
-                // Fetch all registered live users from the server
+                socketManager.connect("https://connectx-5kk8.onrender.com", auth.userId)
+
+                // Fetch all live users from server
                 try {
                     val usersResp = apiService.getUsers()
                     if (usersResp.isSuccessful && usersResp.body() != null) {
@@ -130,10 +305,10 @@ class ConnectXRepository @Inject constructor(
                                     name = user.name,
                                     avatarUrl = user.avatarUrl,
                                     isGroup = false,
-                                    lastMessage = "Connected on ConnectX live",
+                                    lastMessage = "Tap to start chatting",
                                     lastMessageTimestamp = System.currentTimeMillis(),
-                                    isOnline = true,
-                                    lastSeen = "Online"
+                                    isOnline = user.isOnline,
+                                    lastSeen = if (user.isOnline) "Online" else "Recently"
                                 )
                             )
                         }
@@ -142,10 +317,10 @@ class ConnectXRepository @Inject constructor(
 
                 Result.success(true)
             } else {
-                Result.failure(Exception("Authentication failed: Invalid credentials or server error"))
+                Result.failure(Exception("Authentication failed"))
             }
         } catch (e: Exception) {
-            Result.failure(Exception("Cannot reach authentication server: ${e.localizedMessage}"))
+            Result.failure(Exception("Cannot reach server: ${e.localizedMessage}"))
         }
     }
 
@@ -185,8 +360,35 @@ class ConnectXRepository @Inject constructor(
             timestamp = System.currentTimeMillis()
         )
         messageDao.insertMessage(message)
-        chatDao.updateLastMessage(chatId, if (type == MessageType.TEXT) content else "Attachment: ${type.name}", System.currentTimeMillis())
+        chatDao.updateLastMessage(chatId, if (type == MessageType.TEXT) content else "Attachment", System.currentTimeMillis())
         socketManager.sendMessage(chatId = chatId, senderId = currentUserId, senderName = "Me", content = content)
+    }
+
+    fun startCall(targetUserId: String, targetUserName: String, type: CallType) {
+        webRtcClient.startCall(
+            callerId = currentUserId,
+            targetId = targetUserId,
+            targetName = targetUserName,
+            targetAvatar = null,
+            type = type
+        )
+        // Also send the ring invitation so the callee's phone shows incoming call screen
+        socketManager.sendCallOffer(
+            callerId = currentUserId,
+            callerName = "Me",
+            targetId = targetUserId,
+            callType = type.name
+        )
+    }
+
+    fun acceptCall() {
+        webRtcClient.acceptCall()
+        // After accepting, the callee creates a PeerConnection
+        // SDP offer will arrive via sdpOfferFlow → handled automatically in init{}
+    }
+
+    fun rejectCall() {
+        webRtcClient.rejectCall()
     }
 
     suspend fun togglePin(msgId: String, currentPin: Boolean) {
@@ -207,16 +409,6 @@ class ConnectXRepository @Inject constructor(
 
     suspend fun deleteMessageForEveryone(msgId: String) {
         messageDao.deleteForEveryone(msgId)
-    }
-
-    fun startCall(targetUserId: String, targetUserName: String, type: com.connectx.app.webrtc.CallType) {
-        webRtcClient.startCall(targetUserName, null, type)
-        socketManager.sendCallOffer(
-            callerId = currentUserId,
-            callerName = "Me",
-            targetId = targetUserId,
-            callType = type.name
-        )
     }
 
     suspend fun createGroup(name: String, description: String, memberIds: List<String>) {
@@ -252,9 +444,10 @@ class ConnectXRepository @Inject constructor(
         chatDao.insertChats(mockChats)
 
         val mockCallLogs = listOf(
-            com.connectx.app.data.local.entity.CallLogEntity("cl_1", "Alice Vance", null, "VIDEO", isIncoming = true, isMissed = false, durationSeconds = 145, timestamp = System.currentTimeMillis() - 1800000),
-            com.connectx.app.data.local.entity.CallLogEntity("cl_2", "Bob Smith", null, "VOICE", isIncoming = false, isMissed = false, durationSeconds = 62, timestamp = System.currentTimeMillis() - 7200000),
-            com.connectx.app.data.local.entity.CallLogEntity("cl_3", "Charlie Brown", null, "VOICE", isIncoming = true, isMissed = true, durationSeconds = 0, timestamp = System.currentTimeMillis() - 86400000)
+            CallLogEntity("cl_1", "Alice Vance", null, "VIDEO", isIncoming = true, isMissed = false, durationSeconds = 145, timestamp = System.currentTimeMillis() - 1800000),
+            CallLogEntity("cl_2", "Bob Smith", null, "VOICE", isIncoming = false, isMissed = false, durationSeconds = 62, timestamp = System.currentTimeMillis() - 7200000),
+            CallLogEntity("cl_3", "Charlie Brown", null, "VOICE", isIncoming = true, isMissed = true, durationSeconds = 0, timestamp = System.currentTimeMillis() - 86400000)
+
         )
         mockCallLogs.forEach { callLogDao.insertCallLog(it) }
     }

@@ -27,8 +27,11 @@ data class SocketMessage(
 class RealtimeSocketManager @Inject constructor(
     private val prefsManager: AppPreferencesManager
 ) {
+    private val TAG = "RealtimeSocketManager"
     private var socket: Socket? = null
     private val scope = CoroutineScope(Dispatchers.IO)
+
+    // ── Inbound flows ──────────────────────────────────────────────────
 
     private val _incomingMessages = MutableSharedFlow<SocketMessage>()
     val incomingMessages: SharedFlow<SocketMessage> = _incomingMessages
@@ -38,6 +41,28 @@ class RealtimeSocketManager @Inject constructor(
 
     private val _newUserDiscovered = MutableSharedFlow<JSONObject>()
     val newUserDiscovered: SharedFlow<JSONObject> = _newUserDiscovered
+
+    private val _userStatusUpdate = MutableSharedFlow<JSONObject>()
+    val userStatusUpdate: SharedFlow<JSONObject> = _userStatusUpdate
+
+    // WebRTC signaling inbound flows
+    private val _sdpOfferFlow = MutableSharedFlow<JSONObject>()
+    val sdpOfferFlow: SharedFlow<JSONObject> = _sdpOfferFlow
+
+    private val _sdpAnswerFlow = MutableSharedFlow<JSONObject>()
+    val sdpAnswerFlow: SharedFlow<JSONObject> = _sdpAnswerFlow
+
+    private val _iceCandidateFlow = MutableSharedFlow<JSONObject>()
+    val iceCandidateFlow: SharedFlow<JSONObject> = _iceCandidateFlow
+
+    private val _callRejectFlow = MutableSharedFlow<JSONObject>()
+    val callRejectFlow: SharedFlow<JSONObject> = _callRejectFlow
+
+    private val _callEndFlow = MutableSharedFlow<JSONObject>()
+    val callEndFlow: SharedFlow<JSONObject> = _callEndFlow
+
+    private val _callBusyFlow = MutableSharedFlow<JSONObject>()
+    val callBusyFlow: SharedFlow<JSONObject> = _callBusyFlow
 
     init {
         scope.launch {
@@ -53,31 +78,51 @@ class RealtimeSocketManager @Inject constructor(
             val options = IO.Options().apply {
                 forceNew = true
                 reconnection = true
+                reconnectionAttempts = Int.MAX_VALUE
+                reconnectionDelay = 1000
+                timeout = 20000
             }
-            val cleanUrl = if (wsUrl.startsWith("wss://")) wsUrl.replace("wss://", "https://") 
-                           else if (wsUrl.startsWith("ws://")) wsUrl.replace("ws://", "http://") 
-                           else wsUrl
+            val cleanUrl = wsUrl
+                .replace("wss://", "https://")
+                .replace("ws://", "http://")
 
             socket = IO.socket(cleanUrl, options)
 
+            // ── Connect ──
             socket?.on(Socket.EVENT_CONNECT) {
-                Log.d("SocketManager", "Connected to Socket server: $cleanUrl")
+                Log.d(TAG, "Connected: $cleanUrl")
                 socket?.emit("register_user", userId)
             }
 
+            socket?.on(Socket.EVENT_DISCONNECT) {
+                Log.w(TAG, "Disconnected from server")
+            }
+
+            socket?.on(Socket.EVENT_CONNECT_ERROR) { args ->
+                Log.e(TAG, "Connection error: ${args.firstOrNull()}")
+            }
+
+            // ── User discovery ──
             socket?.on("user_registered") { args ->
                 if (args.isNotEmpty() && args[0] is JSONObject) {
                     scope.launch { _newUserDiscovered.emit(args[0] as JSONObject) }
                 }
             }
 
+            socket?.on("user_status") { args ->
+                if (args.isNotEmpty() && args[0] is JSONObject) {
+                    scope.launch { _userStatusUpdate.emit(args[0] as JSONObject) }
+                }
+            }
+
+            // ── Chat messages ──
             socket?.on("receive_message") { args ->
                 if (args.isNotEmpty() && args[0] is JSONObject) {
                     val obj = args[0] as JSONObject
                     val msg = SocketMessage(
                         id = obj.optString("id", System.currentTimeMillis().toString()),
-                        chatId = obj.optString("senderId", "user_201"),
-                        senderId = obj.optString("senderId", "user_201"),
+                        chatId = obj.optString("senderId", ""),
+                        senderId = obj.optString("senderId", ""),
                         senderName = obj.optString("senderName", "Friend"),
                         content = obj.optString("content", ""),
                         timestamp = obj.optLong("timestamp", System.currentTimeMillis())
@@ -86,17 +131,63 @@ class RealtimeSocketManager @Inject constructor(
                 }
             }
 
+            // ── WebRTC Call Invite ──
             socket?.on("call_offer") { args ->
                 if (args.isNotEmpty() && args[0] is JSONObject) {
                     scope.launch { _incomingCallOffer.emit(args[0] as JSONObject) }
                 }
             }
 
+            // ── WebRTC SDP Offer (from caller → callee) ──
+            socket?.on("sdp_offer") { args ->
+                if (args.isNotEmpty() && args[0] is JSONObject) {
+                    Log.d(TAG, "Received sdp_offer")
+                    scope.launch { _sdpOfferFlow.emit(args[0] as JSONObject) }
+                }
+            }
+
+            // ── WebRTC SDP Answer (from callee → caller) ──
+            socket?.on("sdp_answer") { args ->
+                if (args.isNotEmpty() && args[0] is JSONObject) {
+                    Log.d(TAG, "Received sdp_answer")
+                    scope.launch { _sdpAnswerFlow.emit(args[0] as JSONObject) }
+                }
+            }
+
+            // ── ICE Candidates (both directions) ──
+            socket?.on("ice_candidate") { args ->
+                if (args.isNotEmpty() && args[0] is JSONObject) {
+                    scope.launch { _iceCandidateFlow.emit(args[0] as JSONObject) }
+                }
+            }
+
+            // ── Call Control ──
+            socket?.on("call_reject") { args ->
+                if (args.isNotEmpty() && args[0] is JSONObject) {
+                    scope.launch { _callRejectFlow.emit(args[0] as JSONObject) }
+                }
+            }
+
+            socket?.on("call_end") { args ->
+                if (args.isNotEmpty() && args[0] is JSONObject) {
+                    scope.launch { _callEndFlow.emit(args[0] as JSONObject) }
+                }
+            }
+
+            socket?.on("call_busy") { args ->
+                if (args.isNotEmpty() && args[0] is JSONObject) {
+                    scope.launch { _callBusyFlow.emit(args[0] as JSONObject) }
+                }
+            }
+
             socket?.connect()
+            Log.d(TAG, "Connecting to $cleanUrl as $userId")
         } catch (e: Exception) {
-            Log.e("SocketManager", "Socket connection error: ${e.message}")
+            Log.e(TAG, "Socket connection error: ${e.message}")
         }
     }
+
+    // ── Outbound: Chat ──
 
     fun sendMessage(chatId: String, senderId: String, senderName: String, content: String) {
         val obj = JSONObject().apply {
@@ -110,6 +201,7 @@ class RealtimeSocketManager @Inject constructor(
         socket?.emit("send_message", obj)
     }
 
+    // ── Outbound: Call Invite ──
     fun sendCallOffer(callerId: String, callerName: String, targetId: String, callType: String) {
         val obj = JSONObject().apply {
             put("callerId", callerId)
@@ -118,5 +210,59 @@ class RealtimeSocketManager @Inject constructor(
             put("callType", callType)
         }
         socket?.emit("call_offer", obj)
+    }
+
+    // ── Outbound: SDP Offer ──
+    fun sendSdpOffer(callerId: String, targetId: String, sdpJson: String) {
+        val obj = JSONObject().apply {
+            put("callerId", callerId)
+            put("targetId", targetId)
+            put("sdp", sdpJson)
+        }
+        socket?.emit("sdp_offer", obj)
+        Log.d(TAG, "Sent sdp_offer to $targetId")
+    }
+
+    // ── Outbound: SDP Answer ──
+    fun sendSdpAnswer(callerId: String, targetId: String, sdpJson: String) {
+        val obj = JSONObject().apply {
+            put("callerId", callerId)
+            put("targetId", targetId)
+            put("sdp", sdpJson)
+        }
+        socket?.emit("sdp_answer", obj)
+        Log.d(TAG, "Sent sdp_answer to $callerId")
+    }
+
+    // ── Outbound: ICE Candidate ──
+    fun sendIceCandidate(senderId: String, targetId: String, candidateJson: String) {
+        val obj = JSONObject().apply {
+            put("senderId", senderId)
+            put("targetId", targetId)
+            put("candidate", candidateJson)
+        }
+        socket?.emit("ice_candidate", obj)
+    }
+
+    // ── Outbound: Call Control ──
+    fun sendCallReject(callerId: String, targetId: String) {
+        val obj = JSONObject().apply {
+            put("callerId", callerId)
+            put("targetId", targetId)
+        }
+        socket?.emit("call_reject", obj)
+    }
+
+    fun sendCallEnd(senderId: String, targetId: String) {
+        val obj = JSONObject().apply {
+            put("senderId", senderId)
+            put("targetId", targetId)
+        }
+        socket?.emit("call_end", obj)
+    }
+
+    fun disconnect() {
+        socket?.disconnect()
+        socket = null
     }
 }

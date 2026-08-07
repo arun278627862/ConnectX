@@ -9,66 +9,84 @@ const fs = require('fs');
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server, {
-    cors: {
-        origin: "*",
-        methods: ["GET", "POST"]
-    }
+    cors: { origin: "*", methods: ["GET", "POST", "PUT"] },
+    pingTimeout: 60000,
+    pingInterval: 25000
 });
 
 const PORT = process.env.PORT || 3000;
 const JWT_SECRET = process.env.JWT_SECRET || "connectx_super_secret_jwt_key_2026";
 
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '10mb' }));
 
-// Ensure uploads folder exists
-const uploadsDir = path.join(__dirname, 'uploads');
-if (!fs.existsSync(uploadsDir)) {
-    fs.mkdirSync(uploadsDir);
+// Persistent user registry (survives Render restarts via JSON file)
+const usersFilePath = path.join('/tmp', 'connectx_users.json');
+
+function loadUsers() {
+    try {
+        if (fs.existsSync(usersFilePath)) {
+            const data = fs.readFileSync(usersFilePath, 'utf8');
+            const arr = JSON.parse(data);
+            const map = new Map();
+            arr.forEach(u => map.set(u.id, u));
+            return map;
+        }
+    } catch (e) { console.error('Failed to load users:', e.message); }
+    return new Map();
 }
-app.use('/uploads', express.static(uploadsDir));
 
-// Health check endpoint
+function saveUsers(map) {
+    try {
+        fs.writeFileSync(usersFilePath, JSON.stringify(Array.from(map.values())), 'utf8');
+    } catch (e) { console.error('Failed to save users:', e.message); }
+}
+
+const registeredUsers = loadUsers();
+
+// Health check
 app.get('/', (req, res) => {
     res.json({
         status: 'online',
         service: 'ConnectX Backend Server',
-        version: '1.0.0',
+        version: '2.0.0',
+        users: registeredUsers.size,
         timestamp: new Date().toISOString()
     });
 });
 
 app.get('/api/health', (req, res) => {
-    res.json({ status: 'OK', serverTime: new Date() });
+    res.json({ status: 'OK', serverTime: new Date(), users: registeredUsers.size });
 });
 
-// In-memory registered users database
-const registeredUsers = new Map();
+// ─────────────────────────────────────────────
+// AUTH ENDPOINTS
+// ─────────────────────────────────────────────
 
-// Authentication endpoints
 app.post('/api/auth/login', (req, res) => {
     const { email, password, phone, otp, googleIdToken } = req.body;
     const userEmail = email || `${phone || 'user'}@connectx.io`;
-    // Create consistent deterministic userId based on email/phone
-    const userId = "usr_" + Buffer.from(userEmail).toString('hex').substring(0, 10);
+    // Deterministic userId so same credentials always produce same ID
+    const userId = "usr_" + Buffer.from(userEmail).toString('hex').substring(0, 12);
     const userName = userEmail.split('@')[0];
 
     const userObj = {
         id: userId,
         name: userName,
         email: userEmail,
-        phoneNumber: phone || "+1 555-0199",
+        phoneNumber: phone || null,
         avatarUrl: null,
-        statusMessage: "Hey there! I am using ConnectX live.",
+        statusMessage: "Hey there! I am using ConnectX.",
         isOnline: true,
-        lastSeen: "Online"
+        lastSeen: new Date().toISOString()
     };
 
     registeredUsers.set(userId, userObj);
-    
-    // Broadcast newly registered user to all online sockets
+    saveUsers(registeredUsers);
+
+    // Notify all connected sockets about the newly logged-in user
     io.emit('user_registered', userObj);
-    
+
     const accessToken = jwt.sign({ userId, email: userEmail }, JWT_SECRET, { expiresIn: '7d' });
     const refreshToken = jwt.sign({ userId, email: userEmail }, JWT_SECRET, { expiresIn: '30d' });
 
@@ -78,30 +96,40 @@ app.post('/api/auth/login', (req, res) => {
         userId,
         email: userEmail,
         name: userName,
-        phone: phone || "+1 555-0199",
+        phone: phone || null,
         photoUrl: null
     });
 });
 
-app.get('/api/users', (req, res) => {
-    const users = Array.from(registeredUsers.values());
-    res.json(users);
-});
-
 app.post('/api/auth/otp/send', (req, res) => {
-    res.json({ success: true, message: "OTP sent successfully" });
+    res.json({ success: true, message: "OTP sent (demo mode)" });
 });
 
 app.post('/api/auth/otp/verify', (req, res) => {
     const { phone } = req.body;
-    const userId = "usr_" + Math.random().toString(36).substring(2, 9);
+    const userEmail = `${phone}@connectx.io`;
+    const userId = "usr_" + Buffer.from(userEmail).toString('hex').substring(0, 12);
     const accessToken = jwt.sign({ userId, phone }, JWT_SECRET, { expiresIn: '7d' });
+
+    const userObj = {
+        id: userId,
+        name: `User_${phone ? phone.slice(-4) : '0000'}`,
+        email: userEmail,
+        phoneNumber: phone,
+        avatarUrl: null,
+        isOnline: true,
+        lastSeen: new Date().toISOString()
+    };
+    registeredUsers.set(userId, userObj);
+    saveUsers(registeredUsers);
+    io.emit('user_registered', userObj);
+
     res.json({
         accessToken,
         refreshToken: accessToken,
         userId,
-        email: `${phone}@connectx.io`,
-        name: `User_${phone.slice(-4)}`,
+        email: userEmail,
+        name: userObj.name,
         phone,
         photoUrl: null
     });
@@ -112,88 +140,145 @@ app.post('/api/auth/refresh', (req, res) => {
     try {
         const decoded = jwt.verify(token, JWT_SECRET);
         const accessToken = jwt.sign({ userId: decoded.userId, email: decoded.email }, JWT_SECRET, { expiresIn: '7d' });
-        res.json({
-            accessToken,
-            refreshToken: token,
-            userId: decoded.userId,
-            email: decoded.email,
-            name: decoded.email.split('@')[0]
-        });
+        res.json({ accessToken, refreshToken: token, userId: decoded.userId, email: decoded.email, name: decoded.email ? decoded.email.split('@')[0] : 'User' });
     } catch (e) {
         res.status(401).json({ error: "Invalid refresh token" });
     }
 });
 
-// WebSockets & WebRTC Signaling
-const connectedUsers = new Map(); // socketId -> userId
+// Get all registered users
+app.get('/api/users', (req, res) => {
+    const users = Array.from(registeredUsers.values());
+    res.json(users);
+});
+
+// Update user presence
+app.put('/api/user/presence', (req, res) => {
+    const { userId, isOnline } = req.body;
+    const user = registeredUsers.get(userId);
+    if (user) {
+        user.isOnline = isOnline;
+        user.lastSeen = new Date().toISOString();
+        registeredUsers.set(userId, user);
+        saveUsers(registeredUsers);
+        io.emit('user_status', { userId, isOnline, lastSeen: user.lastSeen });
+    }
+    res.json({ success: true });
+});
+
+// ─────────────────────────────────────────────
+// SOCKET.IO — REAL-TIME MESSAGING & WEBRTC SIGNALING
+// ─────────────────────────────────────────────
+
+// Track: userId → socketId mapping
+const userSocketMap = new Map();  // userId -> socketId
+const socketUserMap = new Map();  // socketId -> userId
 
 io.on('connection', (socket) => {
     console.log(`[Socket] Connected: ${socket.id}`);
 
+    // ── User Registration ──
     socket.on('register_user', (userId) => {
-        connectedUsers.set(socket.id, userId);
+        userSocketMap.set(userId, socket.id);
+        socketUserMap.set(socket.id, userId);
         socket.join(userId);
-        console.log(`[Socket] Registered user ${userId} to socket ${socket.id}`);
-        io.emit('user_status', { userId, status: 'online' });
+        console.log(`[Socket] User ${userId} registered on socket ${socket.id}`);
+        // Notify others this user is online
+        socket.broadcast.emit('user_status', { userId, isOnline: true, lastSeen: new Date().toISOString() });
+        // Send current online users list to the newly connected user
+        socket.emit('online_users', Array.from(userSocketMap.keys()));
     });
 
-    // Real-time Chat message forwarding
+    // ── Chat Messages ──
     socket.on('send_message', (data) => {
-        console.log(`[Message] From ${data.senderId} to ${data.chatId}: ${data.content}`);
-        io.to(data.chatId).emit('receive_message', data);
-        socket.to(data.chatId).emit('typing_status', { chatId: data.chatId, isTyping: false });
+        console.log(`[Message] ${data.senderId} → ${data.chatId}: ${data.content}`);
+        // Forward to recipient's room (chatId = recipient userId)
+        socket.to(data.chatId).emit('receive_message', data);
+        // Also send back to sender's other devices if any
+        socket.to(data.senderId).emit('message_sent', data);
     });
 
     socket.on('typing', (data) => {
         socket.to(data.chatId).emit('typing_status', data);
     });
 
-    // WebRTC Signaling (Call Offer, Answer, ICE Candidates)
+    // ── WebRTC Call Signaling ──
+
+    // Step 1: Caller sends invite to callee
     socket.on('call_offer', (data) => {
-        console.log(`[WebRTC Offer] From ${data.callerId} to ${data.targetId}`);
+        // data: { callerId, callerName, targetId, callType }
+        console.log(`[Call] Offer from ${data.callerId} to ${data.targetId} (${data.callType})`);
         io.to(data.targetId).emit('call_offer', data);
     });
 
-    socket.on('call_answer', (data) => {
-        console.log(`[WebRTC Answer] From ${data.targetId} to ${data.callerId}`);
-        io.to(data.callerId).emit('call_answer', data);
+    // Step 2: Caller sends SDP offer to callee
+    socket.on('sdp_offer', (data) => {
+        // data: { callerId, targetId, sdp }
+        console.log(`[SDP] Offer from ${data.callerId} to ${data.targetId}`);
+        io.to(data.targetId).emit('sdp_offer', data);
     });
 
+    // Step 3: Callee sends SDP answer back to caller
+    socket.on('sdp_answer', (data) => {
+        // data: { callerId, targetId, sdp }
+        console.log(`[SDP] Answer from ${data.targetId} to ${data.callerId}`);
+        io.to(data.callerId).emit('sdp_answer', data);
+    });
+
+    // Step 4: Both sides exchange ICE candidates (trickle ICE)
     socket.on('ice_candidate', (data) => {
+        // data: { senderId, targetId, candidate }
         io.to(data.targetId).emit('ice_candidate', data);
     });
 
-    socket.on('end_call', (data) => {
-        io.to(data.targetId).emit('call_ended', data);
+    // Call control events
+    socket.on('call_reject', (data) => {
+        console.log(`[Call] Rejected by ${data.targetId}`);
+        io.to(data.callerId).emit('call_reject', data);
     });
 
-    // Push To Talk (PTT) Live Audio Streaming
+    socket.on('call_end', (data) => {
+        console.log(`[Call] Ended by ${data.senderId}`);
+        io.to(data.targetId).emit('call_end', data);
+    });
+
+    socket.on('call_busy', (data) => {
+        io.to(data.callerId).emit('call_busy', data);
+    });
+
+    socket.on('call_timeout', (data) => {
+        io.to(data.callerId).emit('call_timeout', data);
+    });
+
+    // ── Push To Talk ──
     socket.on('ptt_stream_start', (data) => {
         socket.to(data.channelId).emit('ptt_stream_start', data);
     });
-
-    socket.on('ptt_audio_chunk', (data) => {
-        socket.to(data.channelId).emit('ptt_audio_chunk', data);
+    socket.on('ptt_stream_end', (data) => {
+        socket.to(data.channelId).emit('ptt_stream_end', data);
     });
 
-    socket.on('ptt_stream_stop', (data) => {
-        socket.to(data.channelId).emit('ptt_stream_stop', data);
-    });
-
+    // ── Disconnection ──
     socket.on('disconnect', () => {
-        const userId = connectedUsers.get(socket.id);
+        const userId = socketUserMap.get(socket.id);
         if (userId) {
-            connectedUsers.delete(socket.id);
-            io.emit('user_status', { userId, status: 'offline' });
+            userSocketMap.delete(userId);
+            socketUserMap.delete(socket.id);
+            console.log(`[Socket] User ${userId} disconnected`);
+            // Mark offline in registry
+            const user = registeredUsers.get(userId);
+            if (user) {
+                user.isOnline = false;
+                user.lastSeen = new Date().toISOString();
+                registeredUsers.set(userId, user);
+                saveUsers(registeredUsers);
+            }
+            io.emit('user_status', { userId, isOnline: false, lastSeen: new Date().toISOString() });
         }
-        console.log(`[Socket] Disconnected: ${socket.id}`);
     });
 });
 
 server.listen(PORT, () => {
-    console.log(`==================================================`);
-    console.log(`ConnectX Server running on port ${PORT}`);
-    console.log(`HTTP API: http://localhost:${PORT}/api`);
-    console.log(`WebSocket: ws://localhost:${PORT}`);
-    console.log(`==================================================`);
+    console.log(`ConnectX Server v2.0 running on port ${PORT}`);
+    console.log(`Loaded ${registeredUsers.size} registered users from disk`);
 });
