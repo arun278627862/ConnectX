@@ -56,7 +56,6 @@ class ConnectXRepository @Inject constructor(
     fun getStarredMessages(): Flow<List<MessageEntity>> = messageDao.getStarredMessages()
 
     suspend fun login(email: String, pass: String): Result<Boolean> {
-        val uniqueUserId = "user_${email.lowercase().replace("[^a-z0-9]".toRegex(), "")}"
         return try {
             val response = apiService.login(LoginRequest(email = email, password = pass))
             if (response.isSuccessful && response.body() != null) {
@@ -71,32 +70,36 @@ class ConnectXRepository @Inject constructor(
                     photoUrl = auth.photoUrl
                 )
                 socketManager.connect("wss://connectx-5kk8.onrender.com", auth.userId)
+                
+                // Fetch all registered live users from the server
+                try {
+                    val usersResp = apiService.getUsers()
+                    if (usersResp.isSuccessful && usersResp.body() != null) {
+                        val liveUsers = usersResp.body()!!.filter { it.id != auth.userId }
+                        contactDao.insertContacts(liveUsers)
+                        liveUsers.forEach { user ->
+                            chatDao.insertChat(
+                                ChatEntity(
+                                    id = user.id,
+                                    name = user.name,
+                                    avatarUrl = user.avatarUrl,
+                                    isGroup = false,
+                                    lastMessage = "Connected on ConnectX live",
+                                    lastMessageTimestamp = System.currentTimeMillis(),
+                                    isOnline = true,
+                                    lastSeen = "Online"
+                                )
+                            )
+                        }
+                    }
+                } catch (ignored: Exception) {}
+
                 Result.success(true)
             } else {
-                prefsManager.saveAuthTokens(
-                    accessToken = "mock_jwt_token_$uniqueUserId",
-                    refreshToken = "mock_refresh_token_$uniqueUserId",
-                    userId = uniqueUserId,
-                    email = email,
-                    name = email.substringBefore("@").replaceFirstChar { it.uppercase() },
-                    phone = "+1 555-0199"
-                )
-                socketManager.connect("wss://connectx-5kk8.onrender.com", uniqueUserId)
-                seedMockData(uniqueUserId)
-                Result.success(true)
+                Result.failure(Exception("Authentication failed: Invalid credentials or server error"))
             }
         } catch (e: Exception) {
-            prefsManager.saveAuthTokens(
-                accessToken = "mock_jwt_token_$uniqueUserId",
-                refreshToken = "mock_refresh_token_$uniqueUserId",
-                userId = uniqueUserId,
-                email = email,
-                name = email.substringBefore("@").replaceFirstChar { it.uppercase() },
-                phone = "+1 555-0199"
-            )
-            socketManager.connect("wss://connectx-5kk8.onrender.com", uniqueUserId)
-            seedMockData(uniqueUserId)
-            Result.success(true)
+            Result.failure(Exception("Cannot reach authentication server: ${e.localizedMessage}"))
         }
     }
 

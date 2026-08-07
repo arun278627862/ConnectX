@@ -37,13 +37,19 @@ class AuthViewModel @Inject constructor(
     private val _authSuccess = MutableStateFlow(false)
     val authSuccess: StateFlow<Boolean> = _authSuccess
 
+    private val _errorMessage = MutableStateFlow<String?>(null)
+    val errorMessage: StateFlow<String?> = _errorMessage
+
     fun loginWithEmail(email: String, pass: String) {
         viewModelScope.launch {
             _isLoading.value = true
+            _errorMessage.value = null
             val result = repository.login(email, pass)
             _isLoading.value = false
             if (result.isSuccess) {
                 _authSuccess.value = true
+            } else {
+                _errorMessage.value = result.exceptionOrNull()?.message ?: "Authentication failed"
             }
         }
     }
@@ -51,10 +57,13 @@ class AuthViewModel @Inject constructor(
     fun loginWithPhone(phone: String, otp: String) {
         viewModelScope.launch {
             _isLoading.value = true
+            _errorMessage.value = null
             val result = repository.login(phone, otp)
             _isLoading.value = false
             if (result.isSuccess) {
                 _authSuccess.value = true
+            } else {
+                _errorMessage.value = result.exceptionOrNull()?.message ?: "Authentication failed"
             }
         }
     }
@@ -80,6 +89,7 @@ fun AuthScreen(
 ) {
     val isLoading by viewModel.isLoading.collectAsState()
     val authSuccess by viewModel.authSuccess.collectAsState()
+    val errorMessage by viewModel.errorMessage.collectAsState()
 
     var authMode by remember { mutableStateOf(AuthMode.EMAIL) }
     var email by remember { mutableStateOf("") }
@@ -114,6 +124,20 @@ fun AuthScreen(
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.Center
         ) {
+            errorMessage?.let { error ->
+                Surface(
+                    color = MaterialTheme.colorScheme.errorContainer,
+                    shape = RoundedCornerShape(8.dp),
+                    modifier = Modifier.fillMaxWidth().padding(bottom = 16.dp)
+                ) {
+                    Text(
+                        text = error,
+                        color = MaterialTheme.colorScheme.onErrorContainer,
+                        modifier = Modifier.padding(12.dp),
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                }
+            }
             Surface(
                 modifier = Modifier.padding(bottom = 32.dp),
                 shape = RoundedCornerShape(16.dp),

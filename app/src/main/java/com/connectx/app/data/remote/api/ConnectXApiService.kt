@@ -54,4 +54,7 @@ interface ConnectXApiService {
 
     @PUT("user/profile")
     suspend fun updateProfile(@Body request: UpdateProfileRequest): Response<GenericResponse>
+
+    @GET("users")
+    suspend fun getUsers(): Response<List<com.connectx.app.data.local.entity.ContactEntity>>
 }
