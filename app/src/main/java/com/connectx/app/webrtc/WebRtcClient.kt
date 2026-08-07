@@ -110,16 +110,8 @@ class WebRtcClient @Inject constructor(
             .createIceServer()
     )
 
-    init {
-        initializePeerConnectionFactory()
-    }
 
     private fun initializePeerConnectionFactory() {
-        val options = PeerConnectionFactory.InitializationOptions.builder(context)
-            .setEnableInternalTracer(true)
-            .createInitializationOptions()
-        PeerConnectionFactory.initialize(options)
-
         eglBase = EglBase.create()
 
         peerConnectionFactory = PeerConnectionFactory.builder()
@@ -149,6 +141,7 @@ class WebRtcClient @Inject constructor(
         )
         _callState.value = CallState.OUTGOING
         requestAudioFocus()
+        if (peerConnectionFactory == null) initializePeerConnectionFactory()
         createPeerConnection()
         createAndSendOffer(targetId, type)
     }
@@ -175,6 +168,7 @@ class WebRtcClient @Inject constructor(
     // ─── ACCEPT CALL — callee side ───
     fun acceptCall() {
         requestAudioFocus()
+        if (peerConnectionFactory == null) initializePeerConnectionFactory()
         createPeerConnection()
         _callState.value = CallState.CONNECTED
     }

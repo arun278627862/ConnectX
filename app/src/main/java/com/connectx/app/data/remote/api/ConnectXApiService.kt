@@ -21,6 +21,18 @@ data class AuthResponse(
     val photoUrl: String? = null
 )
 
+// Separate DTO for user data from server (not a Room @Entity)
+data class UserDto(
+    val id: String = "",
+    val name: String = "",
+    val email: String = "",
+    val phoneNumber: String? = null,
+    val avatarUrl: String? = null,
+    val statusMessage: String = "",
+    val isOnline: Boolean = false,
+    val lastSeen: String = "Recently"
+)
+
 data class UpdateProfileRequest(
     val name: String,
     val phone: String,
@@ -55,6 +67,7 @@ interface ConnectXApiService {
     @PUT("user/profile")
     suspend fun updateProfile(@Body request: UpdateProfileRequest): Response<GenericResponse>
 
+    // Returns UserDto list — NOT Room entities (avoids Gson crash on @Entity classes)
     @GET("users")
-    suspend fun getUsers(): Response<List<com.connectx.app.data.local.entity.ContactEntity>>
+    suspend fun getUsers(): Response<List<UserDto>>
 }

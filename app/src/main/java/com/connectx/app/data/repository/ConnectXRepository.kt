@@ -13,6 +13,7 @@ import com.connectx.app.data.local.entity.MessageType
 import com.connectx.app.data.local.preferences.AppPreferencesManager
 import com.connectx.app.data.remote.api.ConnectXApiService
 import com.connectx.app.data.remote.api.LoginRequest
+import com.connectx.app.data.remote.api.UserDto
 import com.connectx.app.data.remote.socket.RealtimeSocketManager
 import com.connectx.app.webrtc.CallType
 import com.connectx.app.webrtc.WebRtcClient
@@ -297,7 +298,20 @@ class ConnectXRepository @Inject constructor(
                     val usersResp = apiService.getUsers()
                     if (usersResp.isSuccessful && usersResp.body() != null) {
                         val liveUsers = usersResp.body()!!.filter { it.id != auth.userId }
-                        contactDao.insertContacts(liveUsers)
+                        // Map UserDto → ContactEntity before saving to Room
+                        val contactEntities = liveUsers.map { dto ->
+                            ContactEntity(
+                                id = dto.id,
+                                name = dto.name,
+                                phoneNumber = dto.phoneNumber ?: "",
+                                email = dto.email,
+                                avatarUrl = dto.avatarUrl,
+                                statusMessage = dto.statusMessage,
+                                isOnline = dto.isOnline,
+                                lastSeen = if (dto.isOnline) "Online" else "Recently"
+                            )
+                        }
+                        contactDao.insertContacts(contactEntities)
                         liveUsers.forEach { user ->
                             chatDao.insertChat(
                                 ChatEntity(
