@@ -89,7 +89,7 @@ class ChatDetailViewModel @Inject constructor(
     }
 
     fun startCall(peerName: String, type: CallType) {
-        webRtcClient.startCall(peerName, null, type)
+        repository.startCall(chatId, peerName, type)
     }
 }
 

@@ -68,8 +68,8 @@ class HomeViewModel @Inject constructor(
         "SYSTEM"
     )
 
-    fun startCall(peerName: String, peerAvatar: String?, type: CallType) {
-        webRtcClient.startCall(peerName, peerAvatar, type)
+    fun startCall(peerId: String, peerName: String, peerAvatar: String?, type: CallType) {
+        repository.startCall(peerId, peerName, type)
     }
 
     fun updateTheme(mode: String) {
@@ -150,8 +150,8 @@ fun HomeScreen(
         Box(modifier = Modifier.padding(padding).fillMaxSize()) {
             when (selectedTab) {
                 0 -> ChatListTab(chats = chats, onChatClick = onNavigateChat)
-                1 -> CallListTab(callLogs = viewModel.callLogs.collectAsState().value, contacts = contacts, onStartCall = { name, avatar, type ->
-                    viewModel.startCall(name, avatar, type)
+                1 -> CallListTab(callLogs = viewModel.callLogs.collectAsState().value, contacts = contacts, onStartCall = { id, name, avatar, type ->
+                    viewModel.startCall(id, name, avatar, type)
                     onNavigateCallScreen()
                 })
                 2 -> ContactListTab(contacts = contacts, onContactClick = { contact ->
@@ -220,7 +220,7 @@ fun ChatListTab(chats: List<ChatEntity>, onChatClick: (String) -> Unit) {
 fun CallListTab(
     callLogs: List<com.connectx.app.data.local.entity.CallLogEntity>,
     contacts: List<ContactEntity>,
-    onStartCall: (String, String?, CallType) -> Unit
+    onStartCall: (String, String, String?, CallType) -> Unit
 ) {
     LazyColumn(modifier = Modifier.fillMaxSize()) {
         item {
@@ -261,7 +261,7 @@ fun CallListTab(
                     )
                 },
                 trailingContent = {
-                    IconButton(onClick = { onStartCall(log.callerName, log.callerAvatar, if (log.callType == "VIDEO") CallType.VIDEO else CallType.VOICE) }) {
+                    IconButton(onClick = { onStartCall(log.id, log.callerName, log.callerAvatar, if (log.callType == "VIDEO") CallType.VIDEO else CallType.VOICE) }) {
                         Icon(Icons.Default.Call, contentDescription = "Redial", tint = MaterialTheme.colorScheme.primary)
                     }
                 }
@@ -286,10 +286,10 @@ fun CallListTab(
                 },
                 trailingContent = {
                     Row {
-                        IconButton(onClick = { onStartCall(contact.name, contact.avatarUrl, CallType.VOICE) }) {
+                        IconButton(onClick = { onStartCall(contact.id, contact.name, contact.avatarUrl, CallType.VOICE) }) {
                             Icon(Icons.Default.Call, contentDescription = "Voice Call", tint = MaterialTheme.colorScheme.primary)
                         }
-                        IconButton(onClick = { onStartCall(contact.name, contact.avatarUrl, CallType.VIDEO) }) {
+                        IconButton(onClick = { onStartCall(contact.id, contact.name, contact.avatarUrl, CallType.VIDEO) }) {
                             Icon(Icons.Default.Videocam, contentDescription = "Video Call", tint = MaterialTheme.colorScheme.primary)
                         }
                     }

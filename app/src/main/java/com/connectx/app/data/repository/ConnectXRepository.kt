@@ -25,8 +25,12 @@ class ConnectXRepository @Inject constructor(
     private val callLogDao: com.connectx.app.data.local.dao.CallLogDao,
     private val apiService: ConnectXApiService,
     private val prefsManager: AppPreferencesManager,
-    private val socketManager: RealtimeSocketManager
+    private val socketManager: RealtimeSocketManager,
+    private val webRtcClient: com.connectx.app.webrtc.WebRtcClient
 ) {
+    var currentUserId: String = "user_101"
+        private set
+
     val allChats: Flow<List<ChatEntity>> = chatDao.getAllChats()
     val allContacts: Flow<List<ContactEntity>> = contactDao.getAllContacts()
     val allCallLogs: Flow<List<com.connectx.app.data.local.entity.CallLogEntity>> = callLogDao.getAllCallLogs()
@@ -36,17 +40,25 @@ class ConnectXRepository @Inject constructor(
             socketManager.incomingMessages.collect { msg ->
                 val entity = MessageEntity(
                     id = msg.id,
-                    chatId = msg.chatId,
+                    chatId = msg.senderId,
                     senderId = msg.senderId,
                     senderName = msg.senderName,
-                    receiverId = "me",
+                    receiverId = currentUserId,
                     content = msg.content,
                     type = MessageType.TEXT,
                     status = MessageStatus.READ,
                     timestamp = msg.timestamp
                 )
                 messageDao.insertMessage(entity)
-                chatDao.updateLastMessage(msg.chatId, msg.content, msg.timestamp)
+                chatDao.updateLastMessage(msg.senderId, msg.content, msg.timestamp)
+            }
+        }
+        kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
+            socketManager.incomingCallOffer.collect { json ->
+                val callerName = json.optString("callerName", "ConnectX Caller")
+                val callTypeStr = json.optString("callType", "VOICE")
+                val type = if (callTypeStr == "VIDEO") com.connectx.app.webrtc.CallType.VIDEO else com.connectx.app.webrtc.CallType.VOICE
+                webRtcClient.receiveIncomingCall(callerName, null, type)
             }
         }
         kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
@@ -93,6 +105,7 @@ class ConnectXRepository @Inject constructor(
             val response = apiService.login(LoginRequest(email = email, password = pass))
             if (response.isSuccessful && response.body() != null) {
                 val auth = response.body()!!
+                currentUserId = auth.userId
                 prefsManager.saveAuthTokens(
                     accessToken = auth.accessToken,
                     refreshToken = auth.refreshToken,
@@ -154,7 +167,7 @@ class ConnectXRepository @Inject constructor(
         val message = MessageEntity(
             id = msgId,
             chatId = chatId,
-            senderId = "user_101",
+            senderId = currentUserId,
             senderName = "Me",
             receiverId = chatId,
             content = content,
@@ -173,7 +186,7 @@ class ConnectXRepository @Inject constructor(
         )
         messageDao.insertMessage(message)
         chatDao.updateLastMessage(chatId, if (type == MessageType.TEXT) content else "Attachment: ${type.name}", System.currentTimeMillis())
-        socketManager.sendMessage(chatId = chatId, senderId = "user_101", senderName = "Me", content = content)
+        socketManager.sendMessage(chatId = chatId, senderId = currentUserId, senderName = "Me", content = content)
     }
 
     suspend fun togglePin(msgId: String, currentPin: Boolean) {
@@ -196,6 +209,16 @@ class ConnectXRepository @Inject constructor(
         messageDao.deleteForEveryone(msgId)
     }
 
+    fun startCall(targetUserId: String, targetUserName: String, type: com.connectx.app.webrtc.CallType) {
+        webRtcClient.startCall(targetUserName, null, type)
+        socketManager.sendCallOffer(
+            callerId = currentUserId,
+            callerName = "Me",
+            targetId = targetUserId,
+            callType = type.name
+        )
+    }
+
     suspend fun createGroup(name: String, description: String, memberIds: List<String>) {
         val groupId = "group_${System.currentTimeMillis()}"
         val chat = ChatEntity(
@@ -204,7 +227,7 @@ class ConnectXRepository @Inject constructor(
             avatarUrl = null,
             isGroup = true,
             groupDescription = description,
-            adminId = "user_101",
+            adminId = currentUserId,
             lastMessage = "Group created",
             lastMessageTimestamp = System.currentTimeMillis(),
             memberIds = memberIds.joinToString(",")
