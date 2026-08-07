@@ -13,8 +13,8 @@ import javax.inject.Singleton
 private val Context.dataStore: DataStore<Preferences> by preferencesDataStore(name = "connectx_preferences")
 
 data class AppConfig(
-    val apiBaseUrl: String = "https://example.com/api/",
-    val webSocketUrl: String = "wss://example.com/socket",
+    val apiBaseUrl: String = "https://connectx-5kk8.onrender.com/api/",
+    val webSocketUrl: String = "wss://connectx-5kk8.onrender.com",
     val stunServerUrl: String = "stun:stun.l.google.com:19302",
     val turnServerUrl: String = "turn:turn.example.com:3478",
     val turnUsername: String = "connectx_user",
@@ -61,8 +61,8 @@ class AppPreferencesManager @Inject constructor(
 
     val appConfigFlow: Flow<AppConfig> = context.dataStore.data.map { prefs ->
         AppConfig(
-            apiBaseUrl = prefs[Keys.API_BASE_URL] ?: "https://example.com/api/",
-            webSocketUrl = prefs[Keys.WEBSOCKET_URL] ?: "wss://example.com/socket",
+            apiBaseUrl = prefs[Keys.API_BASE_URL] ?: "https://connectx-5kk8.onrender.com/api/",
+            webSocketUrl = prefs[Keys.WEBSOCKET_URL] ?: "wss://connectx-5kk8.onrender.com",
             stunServerUrl = prefs[Keys.STUN_SERVER_URL] ?: "stun:stun.l.google.com:19302",
             turnServerUrl = prefs[Keys.TURN_SERVER_URL] ?: "turn:turn.example.com:3478",
             turnUsername = prefs[Keys.TURN_USERNAME] ?: "connectx_user",
