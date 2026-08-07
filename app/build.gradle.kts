@@ -107,8 +107,9 @@ dependencies {
     // DataStore Preferences & Proto
     implementation("androidx.datastore:datastore-preferences:1.0.0")
 
-    // WebRTC
+    // WebRTC & Socket.IO
     implementation("io.getstream:stream-webrtc-android:1.1.3")
+    implementation("io.socket:socket.io-client:2.1.0")
 
     // Firebase Messaging & Play Services Auth (Mock/Standard interfaces)
     implementation("com.google.firebase:firebase-messaging-ktx:23.4.0")

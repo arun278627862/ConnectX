@@ -68,3 +68,15 @@ data class ContactEntity(
     val isOnline: Boolean = false,
     val lastSeen: String = "Recently"
 )
+
+@Entity(tableName = "call_logs")
+data class CallLogEntity(
+    @PrimaryKey val id: String,
+    val callerName: String,
+    val callerAvatar: String?,
+    val callType: String, // VOICE or VIDEO
+    val isIncoming: Boolean,
+    val isMissed: Boolean = false,
+    val durationSeconds: Int = 0,
+    val timestamp: Long = System.currentTimeMillis()
+)

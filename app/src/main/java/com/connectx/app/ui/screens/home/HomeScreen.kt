@@ -50,6 +50,12 @@ class HomeViewModel @Inject constructor(
         emptyList()
     )
 
+    val callLogs = repository.allCallLogs.stateIn(
+        viewModelScope,
+        SharingStarted.WhileSubscribed(5000),
+        emptyList()
+    )
+
     val authTokens = prefsManager.authTokensFlow.stateIn(
         viewModelScope,
         SharingStarted.WhileSubscribed(5000),
@@ -144,7 +150,7 @@ fun HomeScreen(
         Box(modifier = Modifier.padding(padding).fillMaxSize()) {
             when (selectedTab) {
                 0 -> ChatListTab(chats = chats, onChatClick = onNavigateChat)
-                1 -> CallListTab(contacts = contacts, onStartCall = { name, avatar, type ->
+                1 -> CallListTab(callLogs = viewModel.callLogs.collectAsState().value, contacts = contacts, onStartCall = { name, avatar, type ->
                     viewModel.startCall(name, avatar, type)
                     onNavigateCallScreen()
                 })
@@ -211,8 +217,66 @@ fun ChatListTab(chats: List<ChatEntity>, onChatClick: (String) -> Unit) {
 }
 
 @Composable
-fun CallListTab(contacts: List<ContactEntity>, onStartCall: (String, String?, CallType) -> Unit) {
+fun CallListTab(
+    callLogs: List<com.connectx.app.data.local.entity.CallLogEntity>,
+    contacts: List<ContactEntity>,
+    onStartCall: (String, String?, CallType) -> Unit
+) {
     LazyColumn(modifier = Modifier.fillMaxSize()) {
+        item {
+            Text(
+                "Recent Calls",
+                style = MaterialTheme.typography.titleMedium,
+                modifier = Modifier.padding(16.dp),
+                color = MaterialTheme.colorScheme.primary
+            )
+        }
+        items(callLogs) { log ->
+            ListItem(
+                headlineContent = {
+                    Text(
+                        log.callerName,
+                        fontWeight = FontWeight.Bold,
+                        color = if (log.isMissed) Color.Red else Color.Unspecified
+                    )
+                },
+                supportingContent = {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            if (log.isIncoming) Icons.Default.CallReceived else Icons.Default.CallMade,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp),
+                            tint = if (log.isMissed) Color.Red else Color.Gray
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("${log.callType} • ${if (log.isMissed) "Missed" else "${log.durationSeconds}s"}")
+                    }
+                },
+                leadingContent = {
+                    Icon(
+                        if (log.callType == "VIDEO") Icons.Default.Videocam else Icons.Default.Call,
+                        contentDescription = null,
+                        modifier = Modifier.size(36.dp),
+                        tint = MaterialTheme.colorScheme.primary
+                    )
+                },
+                trailingContent = {
+                    IconButton(onClick = { onStartCall(log.callerName, log.callerAvatar, if (log.callType == "VIDEO") CallType.VIDEO else CallType.VOICE) }) {
+                        Icon(Icons.Default.Call, contentDescription = "Redial", tint = MaterialTheme.colorScheme.primary)
+                    }
+                }
+            )
+            HorizontalDivider()
+        }
+
+        item {
+            Text(
+                "Contacts",
+                style = MaterialTheme.typography.titleMedium,
+                modifier = Modifier.padding(16.dp),
+                color = MaterialTheme.colorScheme.primary
+            )
+        }
         items(contacts) { contact ->
             ListItem(
                 headlineContent = { Text(contact.name, fontWeight = FontWeight.Bold) },

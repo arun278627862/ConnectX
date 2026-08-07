@@ -11,7 +11,9 @@ import com.connectx.app.data.local.entity.MessageType
 import com.connectx.app.data.local.preferences.AppPreferencesManager
 import com.connectx.app.data.remote.api.ConnectXApiService
 import com.connectx.app.data.remote.api.LoginRequest
+import com.connectx.app.data.remote.socket.RealtimeSocketManager
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.launch
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -20,17 +22,41 @@ class ConnectXRepository @Inject constructor(
     private val chatDao: ChatDao,
     private val messageDao: MessageDao,
     private val contactDao: ContactDao,
+    private val callLogDao: com.connectx.app.data.local.dao.CallLogDao,
     private val apiService: ConnectXApiService,
-    private val prefsManager: AppPreferencesManager
+    private val prefsManager: AppPreferencesManager,
+    private val socketManager: RealtimeSocketManager
 ) {
     val allChats: Flow<List<ChatEntity>> = chatDao.getAllChats()
     val allContacts: Flow<List<ContactEntity>> = contactDao.getAllContacts()
+    val allCallLogs: Flow<List<com.connectx.app.data.local.entity.CallLogEntity>> = callLogDao.getAllCallLogs()
+
+    init {
+        kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
+            socketManager.incomingMessages.collect { msg ->
+                val entity = MessageEntity(
+                    id = msg.id,
+                    chatId = msg.chatId,
+                    senderId = msg.senderId,
+                    senderName = msg.senderName,
+                    receiverId = "me",
+                    content = msg.content,
+                    type = MessageType.TEXT,
+                    status = MessageStatus.READ,
+                    timestamp = msg.timestamp
+                )
+                messageDao.insertMessage(entity)
+                chatDao.updateLastMessage(msg.chatId, msg.content, msg.timestamp)
+            }
+        }
+    }
 
     fun getMessagesForChat(chatId: String): Flow<List<MessageEntity>> = messageDao.getMessagesForChat(chatId)
     fun getPinnedMessages(chatId: String): Flow<List<MessageEntity>> = messageDao.getPinnedMessages(chatId)
     fun getStarredMessages(): Flow<List<MessageEntity>> = messageDao.getStarredMessages()
 
     suspend fun login(email: String, pass: String): Result<Boolean> {
+        val uniqueUserId = "user_${email.lowercase().replace("[^a-z0-9]".toRegex(), "")}"
         return try {
             val response = apiService.login(LoginRequest(email = email, password = pass))
             if (response.isSuccessful && response.body() != null) {
@@ -44,31 +70,32 @@ class ConnectXRepository @Inject constructor(
                     phone = auth.phone,
                     photoUrl = auth.photoUrl
                 )
+                socketManager.connect("wss://connectx-5kk8.onrender.com", auth.userId)
                 Result.success(true)
             } else {
-                // Mock success for offline/demonstration mode if backend not reachable
                 prefsManager.saveAuthTokens(
-                    accessToken = "mock_jwt_token_12345",
-                    refreshToken = "mock_refresh_token_12345",
-                    userId = "user_101",
+                    accessToken = "mock_jwt_token_$uniqueUserId",
+                    refreshToken = "mock_refresh_token_$uniqueUserId",
+                    userId = uniqueUserId,
                     email = email,
-                    name = email.substringBefore("@").capitalize(),
+                    name = email.substringBefore("@").replaceFirstChar { it.uppercase() },
                     phone = "+1 555-0199"
                 )
-                seedMockData()
+                socketManager.connect("wss://connectx-5kk8.onrender.com", uniqueUserId)
+                seedMockData(uniqueUserId)
                 Result.success(true)
             }
         } catch (e: Exception) {
-            // Fallback mock auth
             prefsManager.saveAuthTokens(
-                accessToken = "mock_jwt_token_12345",
-                refreshToken = "mock_refresh_token_12345",
-                userId = "user_101",
+                accessToken = "mock_jwt_token_$uniqueUserId",
+                refreshToken = "mock_refresh_token_$uniqueUserId",
+                userId = uniqueUserId,
                 email = email,
                 name = email.substringBefore("@").replaceFirstChar { it.uppercase() },
                 phone = "+1 555-0199"
             )
-            seedMockData()
+            socketManager.connect("wss://connectx-5kk8.onrender.com", uniqueUserId)
+            seedMockData(uniqueUserId)
             Result.success(true)
         }
     }
@@ -110,6 +137,7 @@ class ConnectXRepository @Inject constructor(
         )
         messageDao.insertMessage(message)
         chatDao.updateLastMessage(chatId, if (type == MessageType.TEXT) content else "Attachment: ${type.name}", System.currentTimeMillis())
+        socketManager.sendMessage(chatId = chatId, senderId = "user_101", senderName = "Me", content = content)
     }
 
     suspend fun togglePin(msgId: String, currentPin: Boolean) {
@@ -148,27 +176,27 @@ class ConnectXRepository @Inject constructor(
         chatDao.insertChat(chat)
     }
 
-    suspend fun seedMockData() {
+    suspend fun seedMockData(currentUserId: String = "user_101") {
         val mockContacts = listOf(
-            ContactEntity("user_201", "Alice Vance", "+1 555-0101", "alice@connectx.io", null, "Available for calls!", true, "Online"),
-            ContactEntity("user_202", "Bob Smith", "+1 555-0102", "bob@connectx.io", null, "At work...", false, "10 mins ago"),
-            ContactEntity("user_203", "Charlie Brown", "+1 555-0103", "charlie@connectx.io", null, "In a meeting", true, "Online"),
-            ContactEntity("user_204", "Diana Prince", "+1 555-0104", "diana@connectx.io", null, "Exploring ConnectX", true, "Online")
+            ContactEntity("user_alice", "Alice Vance", "+1 555-0101", "alice@connectx.io", null, "Available for calls!", true, "Online"),
+            ContactEntity("user_bob", "Bob Smith", "+1 555-0102", "bob@connectx.io", null, "At work...", true, "Online"),
+            ContactEntity("user_charlie", "Charlie Brown", "+1 555-0103", "charlie@connectx.io", null, "In a meeting", true, "Online"),
+            ContactEntity("user_diana", "Diana Prince", "+1 555-0104", "diana@connectx.io", null, "Exploring ConnectX", true, "Online")
         )
         contactDao.insertContacts(mockContacts)
 
         val mockChats = listOf(
-            ChatEntity("user_201", "Alice Vance", null, isGroup = false, lastMessage = "Let's test the WebRTC video call!", lastMessageTimestamp = System.currentTimeMillis() - 300000, unreadCount = 2, isOnline = true, lastSeen = "Online"),
-            ChatEntity("user_202", "Bob Smith", null, isGroup = false, lastMessage = "Sending the project PDF report now.", lastMessageTimestamp = System.currentTimeMillis() - 3600000, unreadCount = 0, isOnline = false, lastSeen = "10 mins ago"),
-            ChatEntity("group_301", "Android Dev Team", null, isGroup = true, groupDescription = "Official ConnectX Dev Team", adminId = "user_101", lastMessage = "Charlie: Push to talk test complete!", lastMessageTimestamp = System.currentTimeMillis() - 86400000, unreadCount = 5)
+            ChatEntity("user_alice", "Alice Vance", null, isGroup = false, lastMessage = "Let me know when you're online!", lastMessageTimestamp = System.currentTimeMillis() - 300000, unreadCount = 0, isOnline = true, lastSeen = "Online"),
+            ChatEntity("user_bob", "Bob Smith", null, isGroup = false, lastMessage = "Hey! Testing real-time connection.", lastMessageTimestamp = System.currentTimeMillis() - 3600000, unreadCount = 0, isOnline = true, lastSeen = "Online"),
+            ChatEntity("group_301", "ConnectX Devs", null, isGroup = true, groupDescription = "Official ConnectX Live Chat", adminId = currentUserId, lastMessage = "Welcome to live real-time chat!", lastMessageTimestamp = System.currentTimeMillis() - 86400000, unreadCount = 0)
         )
         chatDao.insertChats(mockChats)
 
-        val mockMessages = listOf(
-            MessageEntity("m1", "user_201", "user_201", "Alice Vance", "user_101", "Hey there! Ready to start the video call?", MessageType.TEXT, MessageStatus.READ, timestamp = System.currentTimeMillis() - 600000),
-            MessageEntity("m2", "user_201", "user_101", "Me", "user_201", "Yes! Connected via WebRTC and high speed backend.", MessageType.TEXT, MessageStatus.READ, timestamp = System.currentTimeMillis() - 500000),
-            MessageEntity("m3", "user_201", "user_201", "Alice Vance", "user_101", "Let's test the WebRTC video call!", MessageType.TEXT, MessageStatus.DELIVERED, reactions = "👍,❤️", timestamp = System.currentTimeMillis() - 300000)
+        val mockCallLogs = listOf(
+            com.connectx.app.data.local.entity.CallLogEntity("cl_1", "Alice Vance", null, "VIDEO", isIncoming = true, isMissed = false, durationSeconds = 145, timestamp = System.currentTimeMillis() - 1800000),
+            com.connectx.app.data.local.entity.CallLogEntity("cl_2", "Bob Smith", null, "VOICE", isIncoming = false, isMissed = false, durationSeconds = 62, timestamp = System.currentTimeMillis() - 7200000),
+            com.connectx.app.data.local.entity.CallLogEntity("cl_3", "Charlie Brown", null, "VOICE", isIncoming = true, isMissed = true, durationSeconds = 0, timestamp = System.currentTimeMillis() - 86400000)
         )
-        messageDao.insertMessages(mockMessages)
+        mockCallLogs.forEach { callLogDao.insertCallLog(it) }
     }
 }

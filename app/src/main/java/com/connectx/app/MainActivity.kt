@@ -35,8 +35,26 @@ class MainViewModel @Inject constructor(
 @AndroidEntryPoint
 class MainActivity : ComponentActivity() {
 
+    private val requestPermissionLauncher = registerForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.RequestMultiplePermissions()
+    ) { permissions ->
+        // Permissions granted or denied handled
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        
+        // Request runtime permissions on launch
+        val permissionsToRequest = mutableListOf(
+            android.Manifest.permission.CAMERA,
+            android.Manifest.permission.RECORD_AUDIO,
+            android.Manifest.permission.READ_CONTACTS
+        )
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+            permissionsToRequest.add(android.Manifest.permission.POST_NOTIFICATIONS)
+        }
+        requestPermissionLauncher.launch(permissionsToRequest.toTypedArray())
+
         setContent {
             val mainViewModel: MainViewModel = hiltViewModel()
             val authTokens by mainViewModel.authTokens.collectAsState(initial = com.connectx.app.data.local.preferences.AuthTokens())

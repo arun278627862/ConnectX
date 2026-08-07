@@ -46,6 +46,9 @@ object AppModule {
     fun provideContactDao(db: ConnectXDatabase): ContactDao = db.contactDao()
 
     @Provides
+    fun provideCallLogDao(db: ConnectXDatabase): com.connectx.app.data.local.dao.CallLogDao = db.callLogDao()
+
+    @Provides
     @Singleton
     fun provideOkHttpClient(prefsManager: AppPreferencesManager): OkHttpClient {
         val logging = HttpLoggingInterceptor().apply {
